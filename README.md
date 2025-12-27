@@ -10,17 +10,26 @@
 </p>
 
 <p align="center">
-    【📝 <a href="https://arxiv.org/pdf/2501.04227">Paper</a> | 🌐 <a href="https://agentlaboratory.github.io/">Website</a> | 💻 <a href="https://github.com/SamuelSchmidgall/AgentLaboratory">Software</a> | 📰 <a href="https://agentlaboratory.github.io/#citation-ref">Citation</a>】
+    【📝 <a href="https://arxiv.org/pdf/2501.04227">Paper</a> | 🌐 <a href="https://agentlaboratory.github.io/">Website</a> | 🌐 <a href="https://agentrxiv.github.io/">AgentRxiv Website</a> | 💻 <a href="https://github.com/SamuelSchmidgall/AgentLaboratory">Software</a> | 📰 <a href="https://agentlaboratory.github.io/#citation-ref">Citation</a>】
 </p>
+
+### News 
+* [March/24/2025] 🎉 🎊 🎉 Now introducing **AgentRxiv**, a framework where autonomous research agents can upload, retrieve, and build on each other’s research. This allows agents to make cumulative progress on their research.
 
 ## 📖 Overview
 
 - **Agent Laboratory** is an end-to-end autonomous research workflow meant to assist **you** as the human researcher toward **implementing your research ideas**. Agent Laboratory consists of specialized agents driven by large language models to support you through the entire research workflow—from conducting literature reviews and formulating plans to executing experiments and writing comprehensive reports. 
 - This system is not designed to replace your creativity but to complement it, enabling you to focus on ideation and critical thinking while automating repetitive and time-intensive tasks like coding and documentation. By accommodating varying levels of computational resources and human involvement, Agent Laboratory aims to accelerate scientific discovery and optimize your research productivity.
-
 <p align="center">
   <img src="media/AgentLab.png" alt="Demonstration of the flow of AgentClinic" style="width: 99%;">
 </p>
+
+- Agent Laboratory also supports **AgentRxiv**, a framework where autonomous research agents can upload, retrieve, and build on each other’s research. This allows agents to make cumulative progress on their research.
+
+<p align="center">
+  <img src="media/agentrxiv.png" alt="Demonstration of the flow of AgentClinic" style="width: 99%;">
+</p>
+
 
 ### 🔬 How does Agent Laboratory work?
 
@@ -33,7 +42,7 @@
 
 ### 👾 Currently supported models
 
-* **OpenAI**: o1, o1-preview, o1-mini, gpt-4o
+* **OpenAI**: o1, o1-preview, o1-mini, gpt-4o, o3-mini
 * **DeepSeek**: deepseek-chat (deepseek-v3)
 
 To select a specific llm set the flag `--llm-backend="llm_model"` for example `--llm-backend="gpt-4o"` or `--llm-backend="deepseek-chat"`. Please feel free to add a PR supporting new models according to your need!
@@ -74,17 +83,12 @@ sudo apt install pdflatex
 
 5. **Now run Agent Laboratory!**
 
-`python ai_lab_repo.py --api-key "API_KEY_HERE" --llm-backend "o1-mini" --research-topic "YOUR RESEARCH IDEA"`
+`python ai_lab_repo.py --yaml-location "experiment_configs/MATH_agentlab.yaml"`
 
-or, if you don't have pdflatex installed
-
-`python ai_lab_repo.py --api-key "API_KEY_HERE" --llm-backend "o1-mini" --research-topic "YOUR RESEARCH IDEA" --compile-latex "false"`
 
 ### Co-Pilot mode
 
-To run Agent Laboratory in copilot mode, simply set the copilot-mode flag to `"true"`
-
-`python ai_lab_repo.py --api-key "API_KEY_HERE" --llm-backend "o1-mini" --research-topic "YOUR RESEARCH IDEA" --copilot-mode "true"`
+To run Agent Laboratory in copilot mode, simply set the copilot-mode flag in your yaml config to `"true"`
 
 -----
 ## Tips for better research outcomes
@@ -100,28 +104,16 @@ In order to add notes, you must modify the task_notes_LLM structure inside of `a
 
 
 ```
-task_notes_LLM = [
-    {"phases": ["plan formulation"],
-     "note": f"You should come up with a plan for TWO experiments."},
-
-    {"phases": ["plan formulation", "data preparation",  "running experiments"],
-     "note": "Please use gpt-4o-mini for your experiments."},
-
-    {"phases": ["running experiments"],
-     "note": f'Use the following code to inference gpt-4o-mini: \nfrom openai import OpenAI\nos.environ["OPENAI_API_KEY"] = "{api_key}"\nclient = OpenAI()\ncompletion = client.chat.completions.create(\nmodel="gpt-4o-mini-2024-07-18", messages=messages)\nanswer = completion.choices[0].message.content\n'},
-
-    {"phases": ["running experiments"],
-     "note": f"You have access to only gpt-4o-mini using the OpenAI API, please use the following key {api_key} but do not use too many inferences. Do not use openai.ChatCompletion.create or any openai==0.28 commands. Instead use the provided inference code."},
-
-    {"phases": ["running experiments"],
-     "note": "I would recommend using a small dataset (approximately only 100 data points) to run experiments in order to save time. Do not use much more than this unless you have to or are running the final tests."},
-
-    {"phases": ["data preparation", "running experiments"],
-     "note": "You are running on a MacBook laptop. You can use 'mps' with PyTorch"},
-
-    {"phases": ["data preparation", "running experiments"],
-     "note": "Generate figures with very colorful and artistic design."},
-    ]
+task-notes:
+  plan-formulation:
+    - 'You should come up with a plan for only ONE experiment aimed at maximizing performance on the test set of MATH using prompting techniques.'
+    - 'Please use gpt-4o-mini for your experiments'
+    - 'You must evaluate on the entire 500 test questions of MATH'
+  data-preparation:
+    - 'Please use gpt-4o-mini for your experiments'
+    - 'You must evaluate on the entire 500 test questions of MATH'
+    - 'Here is a sample code you can use to load MATH\nfrom datasets import load_dataset\nMATH_test_set = load_dataset("HuggingFaceH4/MATH-500")["test"]'
+...
 ```
 
 --------
@@ -138,21 +130,18 @@ When resources are limited, **optimize by fine-tuning smaller models** on your s
 
 #### [Tip #3] ✅ You can load previous saves from checkpoints ✅
 
-**If you lose progress, internet connection, or if a subtask fails, you can always load from a previous state.** All of your progress is saved by default in the `state_saves` variable, which stores each individual checkpoint. Just pass the following arguments when running `ai_lab_repo.py`
-
-`python ai_lab_repo.py --api-key "API_KEY_HERE" --research-topic "YOUR RESEARCH IDEA" --llm-backend "o1-mini" --load-existing True --load-existing-path "state_saves/LOAD_PATH"`
+**If you lose progress, internet connection, or if a subtask fails, you can always load from a previous state.** All of your progress is saved by default in the `state_saves` variable, which stores each individual checkpoint. 
 
 -----
-
 
 
 #### [Tip #4] 🈯 If you are running in a language other than English 🈲
 
 If you are running Agent Laboratory in a language other than English, no problem, just make sure to provide a language flag to the agents to perform research in your preferred language. Note that we have not extensively studied running Agent Laboratory in other languages, so be sure to report any problems you encounter.
 
-For example, if you are running in Chinese:
+For example, if you are running in Chinese set the language in the yaml:
 
-`python ai_lab_repo.py --api-key "API_KEY_HERE" --research-topic "YOUR RESEARCH IDEA (in your language)" --llm-backend "o1-mini" --language "中文"`
+`language:  "中文"`
 
 ----
 
@@ -173,15 +162,28 @@ If you would like to get in touch, feel free to reach out to [sschmi46@jhu.edu](
 ## Reference / Bibtex
 
 
-
+### Agent Laboratory
 ```bibtex
 @misc{schmidgall2025agentlaboratoryusingllm,
       title={Agent Laboratory: Using LLM Agents as Research Assistants}, 
-      author={Samuel Schmidgall and Yusheng Su and Ze Wang and Ximeng Sun and Jialian Wu and Xiaodong Yu and Jiang Liu and Zicheng Liu and Emad Barsoum},
+      author={Samuel Schmidgall and Yusheng Su and Ze Wang and Ximeng Sun and Jialian Wu and Xiaodong Yu and Jiang Liu and Michael Moor and Zicheng Liu and Emad Barsoum},
       year={2025},
       eprint={2501.04227},
       archivePrefix={arXiv},
       primaryClass={cs.HC},
       url={https://arxiv.org/abs/2501.04227}, 
+}
+```
+
+### AgentRxiv
+```bibtex
+@misc{schmidgall2025agentrxiv,
+      title={AgentRxiv: Towards Collaborative Autonomous Research}, 
+      author={Samuel Schmidgall and Michael Moor},
+      year={2025},
+      eprint={2503.18102},
+      archivePrefix={arXiv},
+      primaryClass={cs.AI},
+      url={https://arxiv.org/abs/2503.18102}, 
 }
 ```

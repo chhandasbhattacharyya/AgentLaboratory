@@ -13,16 +13,6 @@ from pathlib import Path
 from contextlib import contextmanager
 import sys, os
 
-@contextmanager
-def suppress_stdout():
-    with open(os.devnull, "w") as devnull:
-        old_stdout = sys.stdout
-        sys.stdout = devnull
-        try:
-            yield
-        finally:
-            sys.stdout = old_stdout
-
 
 os.environ["JOBLIB_VERBOSITY"] = "0"
 logging.basicConfig(level=logging.WARNING)
@@ -212,6 +202,7 @@ def code_repair(code, error, ctype, REPAIR_LLM, openai_api_key=None):
 
 class MLESolver:
     def __init__(self, dataset_code, openai_api_key=None, notes=None, max_steps=10, insights=None, plan=None, llm_str=None):
+        self.supress_print = False
         if notes is None: self.notes = []
         else: self.notes = notes
         self.dataset_code = dataset_code
@@ -219,9 +210,9 @@ class MLESolver:
         else: self.plan = plan
         self.llm_str = llm_str
         self.verbose = False
-        self.max_codes = 2
+        self.max_codes = 1
         self.st_hist_len = 2
-        self.min_gen_trials = 2
+        self.min_gen_trials = 1
         self.code_lines = str()
         self.st_history = list()
         self.insights = insights
@@ -276,8 +267,8 @@ class MLESolver:
                 prompt=f"{err_hist}\nYou should now use ```REPLACE to create initial code to solve the challenge. Now please enter the ```REPLACE command below:\n ", temp=1.0)
             model_resp = self.clean_text(model_resp)
             cmd_str, code_lines, prev_code_ret, should_execute_code, score = self.process_command(model_resp)
-            print(f"@@@ INIT ATTEMPT: Command Exec // Attempt {num_attempts}: ", str(cmd_str).replace("\n", " | "))
-            print(f"$$$ Score: {score}")
+            if not self.supress_print: print(f"@@@ INIT ATTEMPT: Command Exec // Attempt {num_attempts}: ", str(cmd_str).replace("\n", " | "))
+            if not self.supress_print: print(f"$$$ Score: {score}")
             if score is not None: break
             num_attempts += 1
         return code_lines, prev_code_ret, score
@@ -308,11 +299,12 @@ class MLESolver:
                 elif score > top_score:
                     best_pkg = copy(code_lines), copy(prev_code_ret), copy(should_execute_code), copy(model_resp), copy(cmd_str)
                     top_score = score
-            print(f"@@@ Command Exec // Attempt {num_attempts}: ", str(cmd_str).replace("\n", " | "))
-            print(f"$$$ Score: {score}")
+            if not self.supress_print: print(f"@@@ Command Exec // Attempt {num_attempts}: ", str(cmd_str).replace("\n", " | "))
+            if not self.supress_print: print(f"$$$ Score: {score}")
             if num_attempts >= self.min_gen_trials and top_score is not None: break
             num_attempts += 1
         self.code_lines, self.prev_code_ret, self.should_execute_code, model_resp, cmd_str = best_pkg
+        if not self.supress_print: print(prev_code_ret)
         # add top scoring code that was successful to the best codes
         if top_score > self.best_codes[-1][1]:
             # replace the lowest scoring one
@@ -349,69 +341,68 @@ class MLESolver:
         should_execute_code = self.should_execute_code
         code_lines = copy(self.code_lines)
         remove_figures()
-        with suppress_stdout(): # shhh
-            for cmd in self.commands:
-                if cmd.matches_command(model_resp):
-                    # attempt to execute the code edit command
-                    if cmd.cmd_type == "CODE-edit":
-                        score = None
-                        failed = True
-                        code_err = str()
-                        for _tries in range(GLOBAL_REPAIR_ATTEMPTS):
-                            success, args = cmd.parse_command(model_resp, copy(self.code_lines), self.dataset_code)
-                            if success:
-                                cmd_return = cmd.execute_command(args)
-                                code_err = f"Return from executing code: {cmd_return[2]}"
-                                if cmd_return[0]:  # if success
-                                    code_lines = copy(cmd_return[1])
-                                    score, cmd_str, is_valid = get_score(self.plan, "\n".join(code_lines), cmd_return[2], openai_api_key=self.openai_api_key, REWARD_MODEL_LLM=self.llm_str)
-                                    if is_valid:
-                                        failed = False
-                                        break
-                                    code_err += f"\nReturn from executing code on real test set {cmd_str}"
-                            repaired_code = code_repair(model_resp, code_err, REPAIR_LLM=self.llm_str, ctype="edit", openai_api_key=self.openai_api_key)
-                            model_resp = repaired_code
-                            print(f"     * Attempting repair // try {_tries}*")
-                        if failed:
-                            cmd_str = f"Code editing FAILED due to the following error: {code_err}. Code was reverted back to original state before edits."
-                            print("$$$$ CODE EDIT (failed)")
-                        else:
-                            cmd_str = "Code was successfully edited."
-                            prev_code_ret = copy(cmd_return[2])
-                            print("$$$$ CODE EDIT (success)")
-                            should_execute_code = True
-                        return cmd_str, code_lines, prev_code_ret, should_execute_code, score
-                    # attempt to execute the code replace command
-                    elif cmd.cmd_type == "CODE-replace": # DONE
-                        score = None
-                        failed = True
-                        code_err = str()
-                        for _tries in range(GLOBAL_REPAIR_ATTEMPTS):
-                            success, args = cmd.parse_command(model_resp, self.dataset_code)
-                            code_err = f"Return from executing code: {args[1]}"
-                            if success:
-                                code_lines = copy(args[0])
-                                score, cmd_str, is_valid = get_score(self.plan, "\n".join(code_lines), args[1], openai_api_key=self.openai_api_key, REWARD_MODEL_LLM=self.llm_str)
+        for cmd in self.commands:
+            if cmd.matches_command(model_resp):
+                # attempt to execute the code edit command
+                if cmd.cmd_type == "CODE-edit":
+                    score = None
+                    failed = True
+                    code_err = str()
+                    for _tries in range(GLOBAL_REPAIR_ATTEMPTS):
+                        success, args = cmd.parse_command(model_resp, copy(self.code_lines), self.dataset_code)
+                        if success:
+                            cmd_return = cmd.execute_command(args)
+                            code_err = f"Return from executing code: {cmd_return[2]}"
+                            if cmd_return[0]:  # if success
+                                code_lines = copy(cmd_return[1])
+                                score, cmd_str, is_valid = get_score(self.plan, "\n".join(code_lines), cmd_return[2], openai_api_key=self.openai_api_key, REWARD_MODEL_LLM=self.llm_str)
                                 if is_valid:
                                     failed = False
                                     break
                                 code_err += f"\nReturn from executing code on real test set {cmd_str}"
-                            repaired_code = code_repair(extract_prompt(model_resp, "REPLACE", ), code_err, ctype="replace", openai_api_key=self.openai_api_key, REPAIR_LLM=self.llm_str)
-                            repaired_code = f"```REPLACE\n{repaired_code}\n```"
-                            model_resp = repaired_code
-                            print(f"     * Attempting repair // try {_tries}*")
-                        if failed:
-                            cmd_str = f"Code replacement FAILED due to the following error: {code_err}.  Code was reverted back to original state before edits."
-                            print("$$$$ CODE REPLACE (failed)")
-                        else:
-                            cmd_str = "Code was successfully replaced."
+                        repaired_code = code_repair(model_resp, code_err, REPAIR_LLM=self.llm_str, ctype="edit", openai_api_key=self.openai_api_key)
+                        model_resp = repaired_code
+                        if not self.supress_print: print(f"     * Attempting repair // try {_tries}*")
+                    if failed:
+                        cmd_str = f"Code editing FAILED due to the following error: {code_err}. Code was reverted back to original state before edits."
+                        if not self.supress_print: print("$$$$ CODE EDIT (failed)")
+                    else:
+                        cmd_str = "Code was successfully edited."
+                        prev_code_ret = copy(cmd_return[2])
+                        if not self.supress_print: print("$$$$ CODE EDIT (success)")
+                        should_execute_code = True
+                    return cmd_str, code_lines, prev_code_ret, should_execute_code, score
+                # attempt to execute the code replace command
+                elif cmd.cmd_type == "CODE-replace": # DONE
+                    score = None
+                    failed = True
+                    code_err = str()
+                    for _tries in range(GLOBAL_REPAIR_ATTEMPTS):
+                        success, args = cmd.parse_command(model_resp, self.dataset_code)
+                        code_err = f"Return from executing code: {args[1]}"
+                        if success:
                             code_lines = copy(args[0])
-                            prev_code_ret = copy(args[1])
-                            print("$$$$ CODE REPLACE (success)")
-                            should_execute_code = True
-                        return cmd_str, code_lines, prev_code_ret, should_execute_code, score
-            print("$$$$ INVALID COMMAND (failed)")
-            return "Command not supported, choose from existing commands", None, None, None, None
+                            score, cmd_str, is_valid = get_score(self.plan, "\n".join(code_lines), args[1], openai_api_key=self.openai_api_key, REWARD_MODEL_LLM=self.llm_str)
+                            if is_valid:
+                                failed = False
+                                break
+                            code_err += f"\nReturn from executing code on real test set {cmd_str}"
+                        repaired_code = code_repair(extract_prompt(model_resp, "REPLACE", ), code_err, ctype="replace", openai_api_key=self.openai_api_key, REPAIR_LLM=self.llm_str)
+                        repaired_code = f"```REPLACE\n{repaired_code}\n```"
+                        model_resp = repaired_code
+                        if not self.supress_print: print(f"     * Attempting repair // try {_tries}*")
+                    if failed:
+                        cmd_str = f"Code replacement FAILED due to the following error: {code_err}.  Code was reverted back to original state before edits."
+                        if not self.supress_print: print("$$$$ CODE REPLACE (failed)")
+                    else:
+                        cmd_str = "Code was successfully replaced."
+                        code_lines = copy(args[0])
+                        prev_code_ret = copy(args[1])
+                        if not self.supress_print: print("$$$$ CODE REPLACE (success)")
+                        should_execute_code = True
+                    return cmd_str, code_lines, prev_code_ret, should_execute_code, score
+        if not self.supress_print: print("$$$$ INVALID COMMAND (failed)")
+        return "Command not supported, choose from existing commands", None, None, None, None
 
     def history_str(self):
         """
@@ -479,12 +470,12 @@ class MLESolver:
         if code_return is not None:
             code_str = self.generate_code_lines(self.code_lines)
             if "[CODE EXECUTION ERROR]" in code_return:
-                print(f"@@@@ ERROR")  # , {code_return.replace('\n', '')}")
+                if not self.supress_print: print(f"@@@@ ERROR")  # , {code_return.replace('\n', '')}")
                 reflect_prompt = f"This is your code: {code_str}\n\nYour code returned the following error {code_return}. Please provide a detailed reflection on why this error was returned, which lines in the code caused this error, and exactly (line by line) how you hope to fix this in the next update. This step is mostly meant to reflect in order to help your future self fix the error better. Do not provide entirely new code but provide suggestions on how to fix the bug using LINE EDITS."
             elif os.path.exists("submission.csv"):
                 self.prev_working_code = copy(self.code_lines)
                 grade_return = get_score(self.plan, "\n".join(self.prev_working_code), code_return, openai_api_key=self.openai_api_key)[0]
-                print(f"@@@@ SUBMISSION: model score {grade_return}", REWARD_MODEL_LLM=self.llm_str)
+                if not self.supress_print: print(f"@@@@ SUBMISSION: model score {grade_return}", REWARD_MODEL_LLM=self.llm_str)
                 f"Your code was properly submitted and you have just received a grade for your model.\nYour score was {grade_return}.\n\n"
                 reflect_prompt = f"This is your code: {code_str}\n\nYour code successfully returned a submission csv. Consider further improving your technique through advanced learning techniques, data augmentation, or hyperparamter tuning to increase the score. Please provide a detailed reflection on how to improve your performance, which lines in the code could be improved upon, and exactly (line by line) how you hope to improve this in the next update. This step is mostly meant to reflect in order to help your future self."
 
@@ -492,7 +483,7 @@ class MLESolver:
                     if file.endswith(".csv"):
                         os.system(f"rm {file}")
             else:
-                print("@@@@ No return")
+                if not self.supress_print: print("@@@@ No return")
                 reflect_prompt = f"This is your code: {code_str}\n\nYour code did not return an error, but also did not successfully submit a submission csv file. Please reflect on how you can improve your submission for the next cycle to submit a file and obtain a high score."
         elif not self.should_execute_code:
             code_return = "No changes were made to the code."

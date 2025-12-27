@@ -13,16 +13,6 @@ from abc import abstractmethod
 from contextlib import contextmanager
 import sys, os
 
-@contextmanager
-def suppress_stdout():
-    with open(os.devnull, "w") as devnull:
-        old_stdout = sys.stdout
-        sys.stdout = devnull
-        try:
-            yield
-        finally:
-            sys.stdout = old_stdout
-
 class Command:
     def __init__(self):
         self.cmd_type = "OTHER"
@@ -99,8 +89,9 @@ class Arxiv(Command):
 """
 
 class PaperReplace(Command):
-    def __init__(self):
+    def __init__(self, save_loc):
         super().__init__()
+        self.save_loc = save_loc
         self.cmd_type = "PAPER-replace"
 
     def docstring(self) -> str:
@@ -122,15 +113,16 @@ class PaperReplace(Command):
 
     def parse_command(self, *args) -> tuple:
         new_latex = extract_prompt(args[0], "REPLACE")
-        latex_ret = compile_latex(new_latex, compile=args[1])
+        latex_ret = compile_latex(new_latex, self.save_loc, compile=args[1])
         if "[CODE EXECUTION ERROR]" in latex_ret: return False, (None, latex_ret,)
         return True, (new_latex.split("\n"), latex_ret)
 
 
 
 class PaperEdit(Command):
-    def __init__(self):
+    def __init__(self, save_loc):
         super().__init__()
+        self.save_loc = save_loc
         self.cmd_type = "PAPER-edit"
 
     def docstring(self) -> str:
@@ -157,7 +149,7 @@ class PaperEdit(Command):
                 current_latex.insert(args[0], _line)
             new_latex = "\n".join(current_latex)
             latex_exec = f"{new_latex}"
-            latex_ret = compile_latex(latex_exec, compile=args[4])
+            latex_ret = compile_latex(latex_exec, self.save_loc, compile=args[4])
             if "error" in latex_ret.lower(): return (False, None, latex_ret)
             return (True, current_latex, latex_ret)
         except Exception as e:
@@ -243,7 +235,8 @@ Please make sure the abstract reads smoothly and is well-motivated. This should 
 }
 
 class PaperSolver:
-    def __init__(self, llm_str, notes=None, max_steps=10, insights=None, plan=None, exp_code=None, exp_results=None, lit_review=None, ref_papers=None, topic=None, openai_api_key=None, compile_pdf=True):
+    def __init__(self, llm_str, notes=None, max_steps=10, insights=None, plan=None, exp_code=None, exp_results=None, lit_review=None, ref_papers=None, topic=None, openai_api_key=None, compile_pdf=True, save_loc=None):
+        self.supress_print = True
         if notes is None: self.notes = []
         else: self.notes = notes
         if plan is None: self.plan = ""
@@ -260,6 +253,7 @@ class PaperSolver:
         else: self.ref_papers = ref_papers
         if topic is None: self.topic = ""
         else: self.topic = topic
+        self.save_loc = save_loc
         self.compile_pdf = compile_pdf
         self.llm_str = llm_str
         self.notes = notes
@@ -285,7 +279,6 @@ class PaperSolver:
                 prompt=f"\nNow please enter a command: ",
                 temp=1.0,
                 openai_api_key=self.openai_api_key)
-            #print(model_resp)
             model_resp = self.clean_text(model_resp)
             cmd_str, paper_lines, prev_paper_ret, score = self.process_command(model_resp)
             if score is not None:
@@ -296,8 +289,8 @@ class PaperSolver:
                     best_pkg = copy(paper_lines), copy(prev_paper_ret), copy(model_resp), copy(cmd_str)
                     top_score = score
             if num_attempts >= self.min_gen_trials and top_score is not None: break
-            print(f"@@@ Command Exec // Attempt {num_attempts}: ", str(cmd_str).replace("\n", " | "))
-            print(f"$$$ Score: {score}")
+            if not self.supress_print: print(f"@@@ Command Exec // Attempt {num_attempts}: ", str(cmd_str).replace("\n", " | "))
+            if not self.supress_print: print(f"$$$ Score: {score}")
             num_attempts += 1
         self.paper_lines, self.prev_paper_ret, model_resp, cmd_str = best_pkg
         # add top scoring paper that was successful to the best papers
@@ -319,14 +312,14 @@ class PaperSolver:
         # @@ Initial PaperGen Commands @@
         # @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
         self.best_score = None
-        self.commands = [PaperReplace()]
+        self.commands = [PaperReplace(self.save_loc)]
         self.model = f"{self.llm_str}"
         init_report, init_return, self.best_score = self.gen_initial_report()
         self.best_report = [(copy(init_report), self.best_score, init_return) for _ in range(1)]
 
         self.paper_lines = init_report
         self.model = f"{self.llm_str}"
-        self.commands = [PaperEdit()] #, Replace()]
+        self.commands = [PaperEdit(self.save_loc)] #, Replace()]
         self.prev_working_report = copy(self.paper_lines)
 
     @staticmethod
@@ -381,7 +374,7 @@ class PaperSolver:
                     for _sect in ["[ABSTRACT HERE]", "[INTRODUCTION HERE]", "[METHODS HERE]", "[RESULTS HERE]", "[DISCUSSION HERE]"]:
                         if _sect not in model_resp:
                             cmd_str = "Error: scaffold section placeholders were not present (e.g. [ABSTRACT HERE])."
-                            print("@@@ INIT ATTEMPT:", cmd_str)
+                            if not self.supress_print: print("@@@ INIT ATTEMPT:", cmd_str)
                             continue
                 elif _section != "scaffold":
                     new_text = extract_prompt(model_resp, "REPLACE")
@@ -389,18 +382,18 @@ class PaperSolver:
                     model_resp = '```REPLACE\n' + copy(section_scaffold_temp) + '\n```'
                     if "documentclass{article}" in new_text or "usepackage{" in new_text:
                             cmd_str = "Error: You must not include packages or documentclass in the text! Your latex must only include the section text, equations, and tables."
-                            print("@@@ INIT ATTEMPT:", cmd_str)
+                            if not self.supress_print: print("@@@ INIT ATTEMPT:", cmd_str)
                             continue
                 cmd_str, latex_lines, prev_latex_ret, score = self.process_command(model_resp, scoring=False)
-                print(f"@@@ INIT ATTEMPT: Command Exec // Attempt {num_attempts}: ", str(cmd_str).replace("\n", " | "))
+                if not self.supress_print: print(f"@@@ INIT ATTEMPT: Command Exec // Attempt {num_attempts}: ", str(cmd_str).replace("\n", " | "))
                 #print(f"$$$ Score: {score}")
                 if score is not None:
                     section_complete = True
                     section_scaffold = "\n".join(latex_lines)
                 num_attempts += 1
             self.paper_lines = section_scaffold.split("\n")
-            print("$"*10, f"SCAFFOLD [{_section}] CREATED", "$"*10)
-        print("$"*10, "SCAFFOLD CREATED", "$"*10)
+            if not self.supress_print: print("$"*10, f"SCAFFOLD [{_section}] CREATED", "$"*10)
+        if not self.supress_print: print("$"*10, "SCAFFOLD CREATED", "$"*10)
         return latex_lines, prev_latex_ret, score
 
     def process_command(self, model_resp, scoring=True):
@@ -442,15 +435,15 @@ class PaperSolver:
                                 score, cmd_str, is_valid = 0.0, "Paper scored successfully", True
                             if is_valid: failed = False
                             paper_err += f"\nReturn from executing latex: {cmd_str}"
-                        print("$$$$ PAPER EDIT (success)")
+                        if not self.supress_print: print("$$$$ PAPER EDIT (success)")
                     if failed:
                         cmd_str = f"Paper edit FAILED due to the following error: {paper_err}.  Paper was reverted back to original state before edits."
-                        print("$$$$ PAPER EDIT (failed)")
+                        if not self.supress_print: print("$$$$ PAPER EDIT (failed)")
                     else:
                         cmd_str = "Paper was successfully edited."
                         paper_lines = copy(args[1])
                         prev_paper_ret = copy(args[2])
-                        print("$$$$ PAPER EDIT (success)")
+                        if not self.supress_print: print("$$$$ PAPER EDIT (success)")
                 elif cmd.cmd_type == "PAPER-replace": # DONE
                     score = None
                     failed = True
@@ -466,12 +459,12 @@ class PaperSolver:
                         paper_err += f"\nReturn from executing code on real test set {cmd_str}"
                     if failed:
                         cmd_str = f"Paper replacement FAILED due to the following error: {paper_err}.  Paper was reverted back to original state before edits."
-                        print("$$$$ PAPER REPLACE (failed)")
+                        if not self.supress_print: print("$$$$ PAPER REPLACE (failed)")
                     else:
                         cmd_str = "Paper was successfully replaced."
                         paper_lines = copy(args[0])
                         prev_paper_ret = copy(args[1])
-                        print("$$$$ PAPER REPLACE (success)")
+                        if not self.supress_print: print("$$$$ PAPER REPLACE (success)")
         return cmd_str, paper_lines, prev_paper_ret, score
 
     def generate_paper_lines(self, code):
@@ -520,14 +513,13 @@ class PaperSolver:
         #paper_len2 = len(("".join(self.paper_lines)).split())
         if paper_len < 4000: paper_progress = f"The current length of the paper is {paper_len} words, you must increase this by {4000-paper_len} words."
         else: paper_progress = ""
-        print(paper_progress)
+        if not self.supress_print: print(paper_progress)
         cmd_set = f"The following are commands you have access to: {self.command_descriptions()}\n." if commands else ""
         if len(self.ref_papers) == 0: ref_papers = ""
         else:
             refpapers = '\n'.join(self.ref_papers)
             ref_papers = f"Here is a reference paper that is high quality:\n{refpapers}\n\n\n"
         lit_review_str = str(self.lit_review)[:20000]
-        #print(len(f"{self.exp_results}"), len(f"{self.exp_code}"), len(f"{self.plan}"), len(f"{self.lit_review}"), len(f"{self.role_description()}"), len(f"{self.phase_prompt()}"), len(f"{self.generate_paper_lines(self.paper_lines)}"), len(f"{section_cmd}"), len(f"{cmd_set}"), len(f"{ref_papers}"))
         return (
             f"{ref_papers}"
             # ROLE DESCRIPTION
@@ -543,7 +535,7 @@ class PaperSolver:
             # EXPERIMENT CODE
             f"A team of research wrote the following code, following this plan: {self.exp_code}\n"
             # EXPERIMENT RESULTS
-            f"After running this code, the following results were observed: {self.exp_results}\n"
+            f"After running this code, the following results were observed: {self.exp_results}\n Your results must ACCURATELY reflect the numbers presented here."
             # EXPERIMENT RESULT INSIGHTS
             f"Provided was an interpretation of the experimental results:\n{self.insights}\n"
             f"Your writing style should be boring and objective.\n"

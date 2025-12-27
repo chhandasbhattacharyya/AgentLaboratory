@@ -1,7 +1,8 @@
+import openai
 import time, tiktoken
 from openai import OpenAI
-import openai
 import os, anthropic, json
+import google.generativeai as genai
 
 TOKENS_IN = dict()
 TOKENS_OUT = dict()
@@ -17,6 +18,7 @@ def curr_cost_est():
         "claude-3-5-sonnet": 3.00 / 1000000,
         "deepseek-chat": 1.00 / 1000000,
         "o1": 15.00 / 1000000,
+        "o3-mini": 1.10 / 1000000,
     }
     costmap_out = {
         "gpt-4o": 10.00/ 1000000,
@@ -26,10 +28,11 @@ def curr_cost_est():
         "claude-3-5-sonnet": 12.00 / 1000000,
         "deepseek-chat": 5.00 / 1000000,
         "o1": 60.00 / 1000000,
+        "o3-mini": 4.40 / 1000000,
     }
     return sum([costmap_in[_]*TOKENS_IN[_] for _ in TOKENS_IN]) + sum([costmap_out[_]*TOKENS_OUT[_] for _ in TOKENS_OUT])
 
-def query_model(model_str, prompt, system_prompt, openai_api_key=None, anthropic_api_key=None, tries=5, timeout=5.0, temp=None, print_cost=True, version="1.5"):
+def query_model(model_str, prompt, system_prompt, openai_api_key=None, gemini_api_key=None,  anthropic_api_key=None, tries=5, timeout=5.0, temp=None, print_cost=True, version="1.5"):
     preloaded_api = os.getenv('OPENAI_API_KEY')
     if openai_api_key is None and preloaded_api is not None:
         openai_api_key = preloaded_api
@@ -40,6 +43,8 @@ def query_model(model_str, prompt, system_prompt, openai_api_key=None, anthropic
         os.environ["OPENAI_API_KEY"] = openai_api_key
     if anthropic_api_key is not None:
         os.environ["ANTHROPIC_API_KEY"] = anthropic_api_key
+    if gemini_api_key is not None:
+        os.environ["GEMINI_API_KEY"] = gemini_api_key
     for _ in range(tries):
         try:
             if model_str == "gpt-4o-mini" or model_str == "gpt4omini" or model_str == "gpt-4omini" or model_str == "gpt4o-mini":
@@ -67,6 +72,28 @@ def query_model(model_str, prompt, system_prompt, openai_api_key=None, anthropic
                         completion = client.chat.completions.create(
                             model="gpt-4o-mini-2024-07-18", messages=messages, temperature=temp)
                 answer = completion.choices[0].message.content
+
+            elif model_str == "gemini-2.0-pro":
+                genai.configure(api_key=gemini_api_key)
+                model = genai.GenerativeModel(model_name="gemini-2.0-pro-exp-02-05", system_instruction=system_prompt)
+                answer = model.generate_content(prompt).text
+            elif model_str == "gemini-1.5-pro":
+                genai.configure(api_key=gemini_api_key)
+                model = genai.GenerativeModel(model_name="gemini-1.5-pro", system_instruction=system_prompt)
+                answer = model.generate_content(prompt).text
+            elif model_str == "o3-mini":
+                model_str = "o3-mini"
+                messages = [
+                    {"role": "user", "content": system_prompt + prompt}]
+                if version == "0.28":
+                    completion = openai.ChatCompletion.create(
+                        model=f"{model_str}",  messages=messages)
+                else:
+                    client = OpenAI()
+                    completion = client.chat.completions.create(
+                        model="o3-mini-2025-01-31", messages=messages)
+                answer = completion.choices[0].message.content
+
             elif model_str == "claude-3.5-sonnet":
                 client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
                 message = client.messages.create(
@@ -161,7 +188,7 @@ def query_model(model_str, prompt, system_prompt, openai_api_key=None, anthropic
                 answer = completion.choices[0].message.content
 
             try:
-                if model_str in ["o1-preview", "o1-mini", "claude-3.5-sonnet", "o1"]:
+                if model_str in ["o1-preview", "o1-mini", "claude-3.5-sonnet", "o1", "o3-mini"]:
                     encoding = tiktoken.encoding_for_model("gpt-4o")
                 elif model_str in ["deepseek-chat"]:
                     encoding = tiktoken.encoding_for_model("cl100k_base")
@@ -175,8 +202,7 @@ def query_model(model_str, prompt, system_prompt, openai_api_key=None, anthropic
                 if print_cost:
                     print(f"Current experiment cost = ${curr_cost_est()}, ** Approximate values, may not reflect true cost")
             except Exception as e:
-                if print_cost:
-                    print(f"Cost approximation has an error? {e}")
+                if print_cost: print(f"Cost approximation has an error? {e}")
             return answer
         except Exception as e:
             print("Inference Exception:", e)

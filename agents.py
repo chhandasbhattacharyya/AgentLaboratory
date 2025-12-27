@@ -1,6 +1,7 @@
 from utils import *
 from tools import *
 from inference import *
+import random, string
 
 
 def extract_json_between_markers(llm_output):
@@ -238,8 +239,13 @@ class BaseAgent:
         text = text.replace("```\n", "```")
         return text
 
+    def override_inference(self, query, temp=0.0):
+        sys_prompt = f"""You are {self.role_description()}"""
+        model_resp = query_model(model_str=self.model, system_prompt=sys_prompt, prompt=query, temp=temp, openai_api_key=self.openai_api_key)
+        return model_resp
+
     def inference(self, research_topic, phase, step, feedback="", temp=None):
-        sys_prompt = f"""You are {self.role_description()} \nTask instructions: {self.phase_prompt(phase)}\n{self.command_descriptions(phase)}"""#\n{self.example_command(phase)}
+        sys_prompt = f"""You are {self.role_description()} \nTask instructions: {self.phase_prompt(phase)}\n{self.command_descriptions(phase)}"""
         context = self.context(phase)
         history_str = "\n".join([_[1] for _ in self.history])
         phase_notes = [_note for _note in self.notes if phase in _note["phases"]]
@@ -418,7 +424,7 @@ class PostdocAgent(BaseAgent):
         if phase == "plan formulation":
             phase_str = (
                 "You are directing a PhD student to help them come up with a good plan, and you interact with them through dialogue.\n"
-                "Your goal is to produce plans that would make good experiments for the given topic. You should aim for a very simple experiment that showcases your plan, not a complex one. You should integrate the provided literature review and come up with plans on how to expand and build on these works for the given topic. Your plans should provide a clear outline for how to achieve the task, including what machine learning models to use and implement, what types of datasets should be searched for and used to train the model, and the exact details of the experiment.\n"
+                "Your goal is to produce plans that would make good experiments for the given topic. You should aim for a very simple experiment that showcases your plan, not a complex one. You should integrate the provided literature review and come up with plans on how to expand and build on these works for the given topic. Your plans should provide a clear outline for how to achieve the task, including what machine learning models to use and implement, what types of datasets should be searched for and used to train the model, and the exact details of the experiment. Your idea should be very innovative and unlike anything seen before.\n"
             )
         elif phase == "results interpretation":
             phase_str = (
@@ -678,7 +684,7 @@ class PhDStudentAgent(BaseAgent):
         elif phase == "plan formulation":
             phase_str = (
                 "You are a PhD student being directed by a postdoc who will help you come up with a good plan, and you interact with them through dialogue.\n"
-                "Your goal is to produce plans that would make good experiments for the given topic. You should aim for a very simple experiment that showcases your plan, not a complex one. You should integrate the provided literature review and come up with plans on how to expand and build on these works for the given topic. Your plans should provide a clear outline for how to achieve the task, including what machine learning models to use and implement, what types of datasets should be searched for and used to train the model, and the exact details of the experiment.\n"
+                "Your goal is to produce plans that would make good experiments for the given topic. You should aim for a very simple experiment that showcases your plan, not a complex one. You should integrate the provided literature review and come up with plans on how to expand and build on these works for the given topic. Your plans should provide a clear outline for how to achieve the task, including what machine learning models to use and implement, what types of datasets should be searched for and used to train the model, and the exact details of the experiment. Your idea should be very innovative and unlike anything seen before.\n"
             )
         elif phase == "results interpretation":
             phase_str = (
@@ -705,10 +711,15 @@ class PhDStudentAgent(BaseAgent):
     def role_description(self):
         return "a computer science PhD student at a top university."
 
-    def add_review(self, review, arx_eng):
+    def add_review(self, review, arx_eng, agentrxiv=False, GLOBAL_AGENTRXIV=None):
         try:
-            arxiv_id, review_text = review.strip().split("\n", 1)
-            full_text = arx_eng.retrieve_full_paper_text(arxiv_id)
+            if agentrxiv:
+                arxiv_id = review.split("\n")[0]
+                review_text = "\n".join(review.split("\n")[1:])
+                full_text = GLOBAL_AGENTRXIV.retrieve_full_text(arxiv_id,)
+            else:
+                arxiv_id, review_text = review.strip().split("\n", 1)
+                full_text = arx_eng.retrieve_full_paper_text(arxiv_id)
             review_entry = {
                 "arxiv_id": arxiv_id,
                 "full_text": full_text,
@@ -717,7 +728,7 @@ class PhDStudentAgent(BaseAgent):
             self.lit_review.append(review_entry)
             return f"Successfully added paper {arxiv_id}", full_text
         except Exception as e:
-            return f"Error trying to add review -- bad formatting, try again: {str(e)}", ""
+            return f"Error trying to add review -- bad formatting, try again: {str(e)}. Your provided Arxiv ID might not be valid. Make sure it references a real paper, which can be found using the SUMMARY command.", ""
 
     def format_review(self):
         return "Provided here is a literature review on this topic:\n" + "\n".join(

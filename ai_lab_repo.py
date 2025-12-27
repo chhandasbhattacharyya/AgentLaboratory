@@ -1,17 +1,23 @@
+import PyPDF2
+import threading
+from app import *
 from agents import *
 from copy import copy
+from pathlib import Path
+from datetime import date
 from common_imports import *
 from mlesolver import MLESolver
-from torch.backends.mkl import verbose
+import argparse, pickle, yaml
 
-import argparse
-import pickle
+GLOBAL_AGENTRXIV = None
+DEFAULT_LLM_BACKBONE = "o3-mini"
+RESEARCH_DIR_PATH = "MATH_research_dir"
 
-DEFAULT_LLM_BACKBONE = "o1-mini"
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 
 class LaboratoryWorkflow:
-    def __init__(self, research_topic, openai_api_key, max_steps=100, num_papers_lit_review=5, agent_model_backbone=f"{DEFAULT_LLM_BACKBONE}", notes=list(), human_in_loop_flag=None, compile_pdf=True, mlesolver_max_steps=3, papersolver_max_steps=5):
+    def __init__(self, research_topic, openai_api_key, max_steps=100, num_papers_lit_review=5, agent_model_backbone=f"{DEFAULT_LLM_BACKBONE}", notes=list(), human_in_loop_flag=None, compile_pdf=True, mlesolver_max_steps=3, papersolver_max_steps=5, paper_index=0, except_if_fail=False, parallelized=False, lab_dir=None, lab_index=0, agentRxiv=False, agentrxiv_papers=5):
         """
         Initialize laboratory workflow
         @param research_topic: (str) description of research idea to explore
@@ -20,11 +26,17 @@ class LaboratoryWorkflow:
         @param agent_model_backbone: (str or dict) model backbone to use for agents
         @param notes: (list) notes for agent to follow during tasks
         """
-
+        self.agentRxiv = agentRxiv
+        self.max_prev_papers = 10
+        self.parallelized = parallelized
         self.notes = notes
+        self.lab_dir = lab_dir
+        self.lab_index = lab_index
         self.max_steps = max_steps
         self.compile_pdf = compile_pdf
+        self.paper_index = paper_index
         self.openai_api_key = openai_api_key
+        self.except_if_fail = except_if_fail
         self.research_topic = research_topic
         self.model_backbone = agent_model_backbone
         self.num_papers_lit_review = num_papers_lit_review
@@ -41,6 +53,7 @@ class LaboratoryWorkflow:
         self.num_ref_papers = 1
         self.review_total_steps = 0 # num steps to take if overridden
         self.arxiv_num_summaries = 5
+        self.num_agentrxiv_papers = agentrxiv_papers
         self.mlesolver_max_steps = mlesolver_max_steps
         self.papersolver_max_steps = papersolver_max_steps
 
@@ -64,7 +77,6 @@ class LaboratoryWorkflow:
             # todo: check if valid
             self.phase_models = agent_model_backbone
 
-
         self.human_in_loop_flag = human_in_loop_flag
 
         self.statistics_per_phase = {
@@ -86,15 +98,6 @@ class LaboratoryWorkflow:
         self.ml_engineer = MLEngineerAgent(model=self.model_backbone, notes=self.notes, max_steps=self.max_steps, openai_api_key=self.openai_api_key)
         self.sw_engineer = SWEngineerAgent(model=self.model_backbone, notes=self.notes, max_steps=self.max_steps, openai_api_key=self.openai_api_key)
 
-        # remove previous files
-        remove_figures()
-        remove_directory("research_dir")
-        # make src and research directory
-        if not os.path.exists("state_saves"):
-            os.mkdir(os.path.join(".", "state_saves"))
-        os.mkdir(os.path.join(".", "research_dir"))
-        os.mkdir(os.path.join("./research_dir", "src"))
-        os.mkdir(os.path.join("./research_dir", "tex"))
 
     def set_model(self, model):
         self.set_agent_attr("model", model)
@@ -106,8 +109,7 @@ class LaboratoryWorkflow:
         @param phase: (str) phase string
         @return: None
         """
-        phase = phase.replace(" ", "_")
-        with open(f"state_saves/{phase}.pkl", "wb") as f:
+        with open(f"state_saves/Paper{self.paper_index}.pkl", "wb") as f:
             pickle.dump(self, f)
 
     def set_agent_attr(self, attr, obj):
@@ -143,7 +145,10 @@ class LaboratoryWorkflow:
             phase_start_time = time.time()  # Start timing the phase
             if self.verbose: print(f"{'*'*50}\nBeginning phase: {phase}\n{'*'*50}")
             for subtask in subtasks:
-                if self.verbose: print(f"{'&'*30}\nBeginning subtask: {subtask}\n{'&'*30}")
+                if self.agentRxiv:
+                    if self.verbose: print(f"{'&' * 30}\n[Lab #{self.lab_index} Paper #{self.paper_index}] Beginning subtask: {subtask}\n{'&' * 30}")
+                else:
+                    if self.verbose: print(f"{'&'*30}\nBeginning subtask: {subtask}\n{'&'*30}")
                 if type(self.phase_models) == dict:
                     if subtask in self.phase_models:
                         self.set_model(self.phase_models[subtask])
@@ -225,7 +230,7 @@ class LaboratoryWorkflow:
                 raise Exception("Model did not respond")
             response = response.lower().strip()[0]
             if response == "n":
-                if verbose: print("*"*40, "\n", "REVIEW COMPLETE", "\n", "*"*40)
+                if self.verbose: print("*"*40, "\n", "REVIEW COMPLETE", "\n", "*"*40)
                 return False
             elif response == "y":
                 self.set_agent_attr("reviewer_response", f"Provided are reviews from a set of three reviewers: {reviews}.")
@@ -243,23 +248,26 @@ class LaboratoryWorkflow:
         # instantiate mle-solver
         from papersolver import PaperSolver
         self.reference_papers = []
-        solver = PaperSolver(notes=report_notes, max_steps=self.papersolver_max_steps, plan=lab.phd.plan, exp_code=lab.phd.results_code, exp_results=lab.phd.exp_results, insights=lab.phd.interpretation, lit_review=lab.phd.lit_review, ref_papers=self.reference_papers, topic=research_topic, openai_api_key=self.openai_api_key, llm_str=self.model_backbone["report writing"], compile_pdf=compile_pdf)
+        solver = PaperSolver(notes=report_notes, max_steps=self.papersolver_max_steps, plan=self.phd.plan, exp_code=self.phd.results_code, exp_results=self.phd.exp_results, insights=self.phd.interpretation, lit_review=self.phd.lit_review, ref_papers=self.reference_papers, topic=research_topic, openai_api_key=self.openai_api_key, llm_str=self.model_backbone["report writing"], compile_pdf=compile_pdf, save_loc=self.lab_dir)
         # run initialization for solver
         solver.initial_solve()
         # run solver for N mle optimization steps
-        for _ in range(self.papersolver_max_steps):
-            solver.solve()
+        for _ in range(self.papersolver_max_steps): solver.solve()
         # get best report results
         report = "\n".join(solver.best_report[0][0])
         score = solver.best_report[0][1]
+        match = re.search(r'\\title\{([^}]*)\}', report)
+        if match: report_title = match.group(1).replace(" ", "_")
+        else: report_title = "\n".join([str(random.randint(0, 10)) for _ in range(10)])
+        if self.agentRxiv: shutil.copyfile(self.lab_dir + "/tex/temp.pdf", f"uploads/{report_title}.pdf")
         if self.verbose: print(f"Report writing completed, reward function score: {score}")
         if self.human_in_loop_flag["report writing"]:
             retry = self.human_in_loop("report writing", report)
             if retry: return retry
         self.set_agent_attr("report", report)
         readme = self.professor.generate_readme()
-        save_to_file("./research_dir", "readme.md", readme)
-        save_to_file("./research_dir", "report.txt", report)
+        save_to_file(f"./{self.lab_dir}", "readme.md", readme)
+        save_to_file(f"./{self.lab_dir}", "report.txt", report)
         self.reset_agents()
         return False
 
@@ -272,6 +280,7 @@ class LaboratoryWorkflow:
         dialogue = str()
         # iterate until max num tries to complete task is exhausted
         for _i in range(max_tries):
+            print(f"@@ Lab #{self.lab_index} Paper #{self.paper_index} @@")
             resp = self.postdoc.inference(self.research_topic, "results interpretation", feedback=dialogue, step=_i)
             if self.verbose: print("Postdoc: ", resp, "\n~~~~~~~~~~~")
             dialogue = str()
@@ -316,14 +325,15 @@ class LaboratoryWorkflow:
         # get best code results
         code = "\n".join(solver.best_codes[0][0])
         # regenerate figures from top code
-        execute_code(code)
+        #execute_code(code)
         score = solver.best_codes[0][1]
         exp_results = solver.best_codes[0][2]
         if self.verbose: print(f"Running experiments completed, reward function score: {score}")
         if self.human_in_loop_flag["running experiments"]:
             retry = self.human_in_loop("data preparation", code)
             if retry: return retry
-        save_to_file("./research_dir/src", "run_experiments.py", code)
+        save_to_file(f"./{self.lab_dir}/src", "run_experiments.py", code)
+        save_to_file(f"./{self.lab_dir}/src", "experiment_output.log", exp_results)
         self.set_agent_attr("results_code", code)
         self.set_agent_attr("exp_results", exp_results)
         # reset agent state
@@ -343,6 +353,7 @@ class LaboratoryWorkflow:
         hf_engine = HFDataSearch()
         # iterate until max num tries to complete task is exhausted
         for _i in range(max_tries):
+            print(f"@@ Lab #{self.lab_index} Paper #{self.paper_index} @@")
             if ml_feedback != "":
                 ml_feedback_in = "Feedback provided to the ML agent: " + ml_feedback
             else: ml_feedback_in = ""
@@ -364,7 +375,7 @@ class LaboratoryWorkflow:
                     if self.human_in_loop_flag["data preparation"]:
                         retry = self.human_in_loop("data preparation", final_code)
                         if retry: return retry
-                    save_to_file("./research_dir/src", "load_data.py", final_code)
+                    save_to_file(f"./{self.lab_dir}/src", "load_data.py", final_code)
                     self.set_agent_attr("dataset_code", final_code)
                     # reset agent state
                     self.reset_agents()
@@ -409,6 +420,7 @@ class LaboratoryWorkflow:
         dialogue = str()
         # iterate until max num tries to complete task is exhausted
         for _i in range(max_tries):
+            print(f"@@ Lab #{self.lab_index} Paper #{self.paper_index} @@")
             # inference postdoc to
             resp = self.postdoc.inference(self.research_topic, "plan formulation", feedback=dialogue, step=_i)
             if self.verbose: print("Postdoc: ", resp, "\n~~~~~~~~~~~")
@@ -438,7 +450,17 @@ class LaboratoryWorkflow:
                 dialogue = extract_prompt(resp, "DIALOGUE")
                 dialogue = f"The following is dialogue produced by the PhD student: {dialogue}"
                 if self.verbose: print("#"*40, "\n", "PhD Dialogue:", dialogue, "#"*40, "\n")
-        raise Exception("Max tries during phase: Plan Formulation")
+        if self.except_if_fail:
+            raise Exception("Max tries during phase: Plan Formulation")
+        else:
+            plan = "No plan specified."
+            if self.human_in_loop_flag["plan formulation"]:
+                retry = self.human_in_loop("plan formulation", plan)
+                if retry: return retry
+            self.set_agent_attr("plan", plan)
+            # reset agent state
+            self.reset_agents()
+            return False
 
     def literature_review(self):
         """
@@ -446,31 +468,37 @@ class LaboratoryWorkflow:
         @return: (bool) whether to repeat the phase
         """
         arx_eng = ArxivSearch()
-        max_tries = self.max_steps * 5 # lit review often requires extra steps
+        max_tries = self.max_steps # lit review often requires extra steps
         # get initial response from PhD agent
-        resp = self.phd.inference(self.research_topic, "literature review", step=0, temp=0.8)
+        resp = self.phd.inference(self.research_topic, "literature review", step=0, temp=0.4)
         if self.verbose: print(resp, "\n~~~~~~~~~~~")
         # iterate until max num tries to complete task is exhausted
         for _i in range(max_tries):
+            print(f"@@ Lab #{self.lab_index} Paper #{self.paper_index} @@")
             feedback = str()
-
             # grab summary of papers from arxiv
             if "```SUMMARY" in resp:
                 query = extract_prompt(resp, "SUMMARY")
                 papers = arx_eng.find_papers_by_str(query, N=self.arxiv_num_summaries)
+                if self.agentRxiv:
+                    if GLOBAL_AGENTRXIV.num_papers() > 0:
+                        papers += GLOBAL_AGENTRXIV.search_agentrxiv(query, self.num_agentrxiv_papers,)
                 feedback = f"You requested arXiv papers related to the query {query}, here was the response\n{papers}"
 
             # grab full text from arxiv ID
             elif "```FULL_TEXT" in resp:
                 query = extract_prompt(resp, "FULL_TEXT")
+                if self.agentRxiv and "AgentRxiv" in query: full_text = GLOBAL_AGENTRXIV.retrieve_full_text(query,)
+                else: full_text = arx_eng.retrieve_full_paper_text(query)
                 # expiration timer so that paper does not remain in context too long
-                arxiv_paper = f"```EXPIRATION {self.arxiv_paper_exp_time}\n" + arx_eng.retrieve_full_paper_text(query) + "```"
+                arxiv_paper = f"```EXPIRATION {self.arxiv_paper_exp_time}\n" + full_text + "```"
                 feedback = arxiv_paper
 
             # if add paper, extract and add to lit review, provide feedback
             elif "```ADD_PAPER" in resp:
                 query = extract_prompt(resp, "ADD_PAPER")
-                feedback, text = self.phd.add_review(query, arx_eng)
+                if self.agentRxiv and "AgentRxiv" in query: feedback, text = self.phd.add_review(query, arx_eng, agentrxiv=True, GLOBAL_AGENTRXIV=GLOBAL_AGENTRXIV)
+                else: feedback, text = self.phd.add_review(query, arx_eng)
                 if len(self.reference_papers) < self.num_ref_papers:
                     self.reference_papers.append(text)
 
@@ -493,9 +521,28 @@ class LaboratoryWorkflow:
                 self.reset_agents()
                 self.statistics_per_phase["literature review"]["steps"] = _i
                 return False
-            resp = self.phd.inference(self.research_topic, "literature review", feedback=feedback, step=_i + 1, temp=0.8)
+            resp = self.phd.inference(self.research_topic, "literature review", feedback=feedback, step=_i + 1, temp=0.4)
             if self.verbose: print(resp, "\n~~~~~~~~~~~")
-        raise Exception("Max tries during phase: Literature Review")
+        if self.except_if_fail: raise Exception("Max tries during phase: Literature Review")
+        else:
+            if len(self.phd.lit_review) >= self.num_papers_lit_review:
+                # generate formal review
+                lit_review_sum = self.phd.format_review()
+                # if human in loop -> check if human is happy with the produced review
+                if self.human_in_loop_flag["literature review"]:
+                    retry = self.human_in_loop("literature review", lit_review_sum)
+                    # if not happy, repeat the process with human feedback
+                    if retry:
+                        self.phd.lit_review = []
+                        return retry
+                # otherwise, return lit review and move on to next stage
+                if self.verbose: print(self.phd.lit_review_sum)
+                # set agent
+                self.set_agent_attr("lit_review_sum", lit_review_sum)
+                # reset agent state
+                self.reset_agents()
+                self.statistics_per_phase["literature review"]["steps"] = _i
+                return False
 
     def human_in_loop(self, phase, phase_prod):
         """
@@ -526,165 +573,194 @@ class LaboratoryWorkflow:
             else: print("Invalid response, type Y or N")
         return False
 
+class AgentRxiv:
+    def __init__(self, lab_index=0):
+        self.lab_index = lab_index
+        self.server_thread = None
+        self.initialize_server()
+        self.pdf_text = dict()
+        self.summaries = dict()
+
+    def initialize_server(self):
+        # Calculate the port dynamically
+        port = 5000 + self.lab_index
+        # Start the server on the computed port using a lambda to pass the port value
+        self.server_thread = threading.Thread(target=lambda: self.run_server(port))
+        self.server_thread.daemon = True
+        self.server_thread.start()
+        time.sleep(5)  # allow time for the server to start up
+
+    @staticmethod
+    def num_papers():
+        return len(os.listdir("uploads"))
+
+    def retrieve_full_text(self, arxiv_id):
+        try:
+            return self.pdf_text[arxiv_id]
+        except Exception:
+            return "Paper ID not found?"
+
+    @staticmethod
+    def read_pdf_pypdf2(pdf_path):
+        with open(pdf_path, 'rb') as pdf_file:
+            reader = PyPDF2.PdfReader(pdf_file)
+            text = ''
+            for page_num in range(len(reader.pages)):
+                page = reader.pages[page_num]
+                text += page.extract_text()
+        return text
+
+    def search_agentrxiv(self, search_query, num_papers):
+        # Use the dynamic port here as well
+        url = f'http://127.0.0.1:{5000 + self.lab_index}/api/search?q={search_query}'
+        return_str = str()
+        try:
+            with app.app_context():
+                update_papers_from_uploads()
+            response = requests.get(url)
+            response.raise_for_status()
+            data = response.json()
+            return_str += "Search Query:" + data['query']
+            return_str += "Results:"
+            for result in data['results'][:num_papers]:
+                arxiv_id = f"AgentRxiv:ID_{result['id']}"
+                if arxiv_id not in self.summaries:
+                    filename = Path(f'_tmp_{self.lab_index}.pdf')
+                    response = requests.get(result['pdf_url'])
+                    filename.write_bytes(response.content)
+                    self.pdf_text[arxiv_id] = self.read_pdf_pypdf2(f'_tmp_{self.lab_index}.pdf')
+                    self.summaries[arxiv_id] = query_model(
+                        prompt=self.pdf_text[arxiv_id],
+                        system_prompt="Please provide a 5 sentence summary of this paper.",
+                        openai_api_key=os.getenv('OPENAI_API_KEY'),
+                        model_str="gpt-4o-mini"
+                    )
+                return_str += f"Title: {result['filename']}"
+                return_str += f"Summary: {self.summaries[arxiv_id]}\n"
+                formatted_date = date.today().strftime("%d/%m/%Y")
+                return_str += f"Publication Date: {formatted_date}\n"
+                return_str += f"arXiv paper ID: AgentRxiv:ID_{result['id']}"
+                return_str += "-" * 40
+        except Exception as e:
+            print(f"AgentRxiv Error: {e}")
+            return_str += f"Error: {e}"
+        return return_str
+
+    def run_server(self, port):
+        run_app(port=port)
 
 
 def parse_arguments():
     parser = argparse.ArgumentParser(description="AgentLaboratory Research Workflow")
 
     parser.add_argument(
-        '--copilot-mode',
+        '--yaml-location',
         type=str,
-        default="False",
-        help='Enable human interaction mode.'
+        default="experiment_configs/MATH_agentlab.yaml",
+        help='Location of YAML to load config data.'
     )
-
-    parser.add_argument(
-        '--deepseek-api-key',
-        type=str,
-        help='Provide the DeepSeek API key.'
-    )
-
-    parser.add_argument(
-        '--load-existing',
-        type=str,
-        default="False",
-        help='Do not load existing state; start a new workflow.'
-    )
-
-    parser.add_argument(
-        '--load-existing-path',
-        type=str,
-        help='Path to load existing state; start a new workflow, e.g. state_saves/results_interpretation.pkl'
-    )
-
-    parser.add_argument(
-        '--research-topic',
-        type=str,
-        help='Specify the research topic.'
-    )
-
-    parser.add_argument(
-        '--api-key',
-        type=str,
-        help='Provide the OpenAI API key.'
-    )
-
-    parser.add_argument(
-        '--compile-latex',
-        type=str,
-        default="True",
-        help='Compile latex into pdf during paper writing phase. Disable if you can not install pdflatex.'
-    )
-
-    parser.add_argument(
-        '--llm-backend',
-        type=str,
-        default="o1-mini",
-        help='Backend LLM to use for agents in Agent Laboratory.'
-    )
-
-    parser.add_argument(
-        '--language',
-        type=str,
-        default="English",
-        help='Language to operate Agent Laboratory in.'
-    )
-
-    parser.add_argument(
-        '--num-papers-lit-review',
-        type=str,
-        default="5",
-        help='Total number of papers to summarize in literature review stage'
-    )
-
-    parser.add_argument(
-        '--mlesolver-max-steps',
-        type=str,
-        default="3",
-        help='Total number of mle-solver steps'
-    )
-
-    parser.add_argument(
-        '--papersolver-max-steps',
-        type=str,
-        default="5",
-        help='Total number of paper-solver steps'
-    )
-
 
     return parser.parse_args()
 
 
+def parse_yaml(yaml_file_loc):
+    with open(yaml_file_loc, 'r') as file: agentlab_data = yaml.safe_load(file)
+    class YamlDataHolder:
+        def __init__(self): pass
+    parser = YamlDataHolder()
+    if "copilot_mode" in agentlab_data: parser.copilot_mode = agentlab_data["copilot_mode"]
+    else: parser.copilot_mode = False
+    if 'load-previous' in agentlab_data: parser.load_previous = agentlab_data["load-previous"]
+    else: parser.load_previous = False
+    if 'research-topic' in agentlab_data: parser.research_topic = agentlab_data["research-topic"]
+    if 'api-key' in agentlab_data: parser.api_key = agentlab_data["api-key"]
+    if 'deepseek-api-key' in agentlab_data: parser.deepseek_api_key = agentlab_data["deepseek-api-key"]
+    if 'compile-latex' in agentlab_data: parser.compile_latex = agentlab_data["compile-latex"]
+    else: parser.compile_latex = True
+    if 'llm-backend' in agentlab_data: parser.llm_backend = agentlab_data["llm-backend"]
+    else: parser.llm_backend = "o3-mini"
+    if 'lit-review-backend' in agentlab_data: parser.lit_review_backend = agentlab_data["lit-review-backend"]
+    else: parser.lit_review_backend = "gpt-4o-mini"
+    if 'language' in agentlab_data: parser.language = agentlab_data["language"]
+    else: parser.language = "English"
+    if 'num-papers-lit-review' in agentlab_data: parser.num_papers_lit_review = agentlab_data["num-papers-lit-review"]
+    else: parser.num_papers_lit_review = 5
+    if 'mlesolver-max-steps' in agentlab_data: parser.mlesolver_max_steps = agentlab_data["mlesolver-max-steps"]
+    else: parser.mlesolver_max_steps = 3
+    if 'papersolver-max-steps' in agentlab_data: parser.papersolver_max_steps = agentlab_data["papersolver-max-steps"]
+    else: parser.papersolver_max_steps = 5
+    if 'task-notes' in agentlab_data: parser.task_notes = agentlab_data["task-notes"]
+    else: parser.task_notes = []
+    if 'num-papers-to-write' in agentlab_data: parser.num_papers_to_write = agentlab_data["num-papers-to-write"]
+    else: parser.num_papers_to_write = 100
+    if 'parallel-labs' in agentlab_data: parser.parallel_labs = agentlab_data["parallel-labs"]
+    else: parser.parallel_labs = False
+    if 'num-parallel-labs' in agentlab_data: parser.num_parallel_labs = agentlab_data["num-parallel-labs"]
+    else: parser.num_parallel_labs = 8
+    if 'except-if-fail' in agentlab_data: parser.except_if_fail = agentlab_data["except-if-fail"]
+    else: parser.except_if_fail = False
+    if 'agentRxiv' in agentlab_data: parser.agentRxiv = agentlab_data["agentRxiv"]
+    else: parser.agentRxiv = False
+    if 'construct-agentRxiv' in agentlab_data: parser.construct_agentRxiv = agentlab_data["construct-agentRxiv"]
+    else: parser.construct_agentRxiv = False
+    if 'agentrxiv-papers' in agentlab_data: parser.agentrxiv_papers = agentlab_data["agentrxiv-papers"]
+    else:  parser.agentrxiv_papers = 5
+
+    if 'lab-index' in agentlab_data: parser.lab_index = agentlab_data["lab-index"]
+    else: parser.lab_index = 0
+    return parser
+
+
 if __name__ == "__main__":
-    args = parse_arguments()
+    user_args = parse_arguments()
+    yaml_to_use = user_args.yaml_location
+    args = parse_yaml(yaml_to_use)
 
     llm_backend = args.llm_backend
-    human_mode = args.copilot_mode.lower() == "true"
-    compile_pdf = args.compile_latex.lower() == "true"
-    load_existing = args.load_existing.lower() == "true"
-    try:
-        num_papers_lit_review = int(args.num_papers_lit_review.lower())
-    except Exception:
-        raise Exception("args.num_papers_lit_review must be a valid integer!")
-    try:
-        papersolver_max_steps = int(args.papersolver_max_steps.lower())
-    except Exception:
-        raise Exception("args.papersolver_max_steps must be a valid integer!")
-    try:
-        mlesolver_max_steps = int(args.mlesolver_max_steps.lower())
-    except Exception:
-        raise Exception("args.papersolver_max_steps must be a valid integer!")
+    human_mode =  args.copilot_mode.lower() == "true" if type(args.copilot_mode) == str else args.copilot_mode
+    compile_pdf = args.compile_latex.lower() == "true" if type(args.compile_latex) == str else args.compile_latex
+    load_previous = args.load_previous.lower() == "true" if type(args.load_previous) == str else args.load_previous
+    parallel_labs = args.parallel_labs.lower() == "true" if type(args.parallel_labs) == str else args.parallel_labs
+    except_if_fail = args.except_if_fail.lower() == "true" if type(args.except_if_fail) == str else args.except_if_fail
+    agentRxiv = args.agentRxiv.lower() == "true" if type(args.agentRxiv) == str else args.agentRxiv
+    construct_agentRxiv = args.construct_agentRxiv.lower() == "true" if type(args.construct_agentRxiv) == str else args.construct_agentRxiv
+    lab_index = int(args.lab_index) if type(args.construct_agentRxiv) == str else args.lab_index
 
+    try: num_papers_to_write = int(args.num_papers_to_write.lower()) if type(args.num_papers_to_write) == str else args.num_papers_to_write
+    except Exception: raise Exception("args.num_papers_lit_review must be a valid integer!")
+    try: num_papers_lit_review = int(args.num_papers_lit_review.lower()) if type(args.num_papers_lit_review) == str else args.num_papers_lit_review
+    except Exception: raise Exception("args.num_papers_lit_review must be a valid integer!")
+    try: papersolver_max_steps = int(args.papersolver_max_steps.lower()) if type(args.papersolver_max_steps) == str else args.papersolver_max_steps
+    except Exception: raise Exception("args.papersolver_max_steps must be a valid integer!")
+    try: mlesolver_max_steps = int(args.mlesolver_max_steps.lower()) if type(args.mlesolver_max_steps) == str else args.mlesolver_max_steps
+    except Exception: raise Exception("args.mlesolver_max_steps must be a valid integer!")
+    if parallel_labs:
+        num_parallel_labs = int(args.num_parallel_labs)
+        print("="*20 , f"RUNNING {num_parallel_labs} LABS IN PARALLEL", "="*20)
+    else: num_parallel_labs = 0
 
-    api_key = os.getenv('OPENAI_API_KEY') or args.api_key
-    deepseek_api_key = os.getenv('DEEPSEEK_API_KEY') or args.deepseek_api_key
-    if args.api_key is not None and os.getenv('OPENAI_API_KEY') is None:
-        os.environ["OPENAI_API_KEY"] = args.api_key
-    if args.deepseek_api_key is not None and os.getenv('DEEPSEEK_API_KEY') is None:
-        os.environ["DEEPSEEK_API_KEY"] = args.deepseek_api_key
+    api_key = (os.getenv('OPENAI_API_KEY') or args.api_key) if (hasattr(args, 'api_key') or os.getenv('OPENAI_API_KEY')) else None
+    deepseek_api_key = (os.getenv('DEEPSEEK_API_KEY') or args.deepseek_api_key) if (hasattr(args, 'deepseek_api_key') or os.getenv('DEEPSEEK_API_KEY')) else None
+    if api_key is not None and os.getenv('OPENAI_API_KEY') is None: os.environ["OPENAI_API_KEY"] = args.api_key
+    if deepseek_api_key is not None and os.getenv('DEEPSEEK_API_KEY') is None: os.environ["DEEPSEEK_API_KEY"] = args.deepseek_api_key
 
-    if not api_key and not deepseek_api_key:
-        raise ValueError("API key must be provided via --api-key / -deepseek-api-key or the OPENAI_API_KEY / DEEPSEEK_API_KEY environment variable.")
+    if not api_key and not deepseek_api_key: raise ValueError("API key must be provided via --api-key / -deepseek-api-key or the OPENAI_API_KEY / DEEPSEEK_API_KEY environment variable.")
 
-    ##########################################################
-    # Research question that the agents are going to explore #
-    ##########################################################
-    if human_mode or args.research_topic is None:
-        research_topic = input("Please name an experiment idea for AgentLaboratory to perform: ")
-    else:
-        research_topic = args.research_topic
+    if human_mode or args.research_topic is None: research_topic = input("Please name an experiment idea for AgentLaboratory to perform: ")
+    else: research_topic = args.research_topic
 
-    task_notes_LLM = [
-        {"phases": ["plan formulation"],
-         "note": f"You should come up with a plan for TWO experiments."},
+    task_notes_LLM = list()
+    task_notes = args.task_notes
+    for _task in task_notes:
+        for _note in task_notes[_task]:
+            task_notes_LLM.append({"phases": [_task.replace("-", " ")], "note": _note})
 
-        {"phases": ["plan formulation", "data preparation", "running experiments"],
-         "note": "Please use gpt-4o-mini for your experiments."},
+    if args.language != "English":
+        task_notes_LLM.append(
+            {"phases": ["literature review", "plan formulation", "data preparation", "running experiments", "results interpretation", "report writing", "report refinement"],
+            "note": f"You should always write in the following language to converse and to write the report {args.language}"},
+        )
 
-        {"phases": ["running experiments"],
-         "note": f'Use the following code to inference gpt-4o-mini: \nfrom openai import OpenAI\nos.environ["OPENAI_API_KEY"] = "{api_key}"\nclient = OpenAI()\ncompletion = client.chat.completions.create(\nmodel="gpt-4o-mini-2024-07-18", messages=messages)\nanswer = completion.choices[0].message.content\n'},
-
-        {"phases": ["running experiments"],
-         "note": f"You have access to only gpt-4o-mini using the OpenAI API, please use the following key {api_key} but do not use too many inferences. Do not use openai.ChatCompletion.create or any openai==0.28 commands. Instead use the provided inference code."},
-
-        {"phases": ["running experiments"],
-         "note": "I would recommend using a small dataset (approximately only 100 data points) to run experiments in order to save time. Do not use much more than this unless you have to or are running the final tests."},
-
-        {"phases": ["data preparation", "running experiments"],
-         "note": "You are running on a MacBook laptop. You can use 'mps' with PyTorch"},
-
-        {"phases": ["data preparation", "running experiments"],
-         "note": "Generate figures with very colorful and artistic design."},
-    ]
-
-    task_notes_LLM.append(
-        {"phases": ["literature review", "plan formulation", "data preparation", "running experiments", "results interpretation", "report writing", "report refinement"],
-        "note": f"You should always write in the following language to converse and to write the report {args.language}"},
-    )
-
-    ####################################################
-    ###  Stages where human input will be requested  ###
-    ####################################################
     human_in_loop = {
         "literature review":      human_mode,
         "plan formulation":       human_mode,
@@ -695,9 +771,6 @@ if __name__ == "__main__":
         "report refinement":      human_mode,
     }
 
-    ###################################################
-    ###  LLM Backend used for the different phases  ###
-    ###################################################
     agent_models = {
         "literature review":      llm_backend,
         "plan formulation":       llm_backend,
@@ -707,27 +780,109 @@ if __name__ == "__main__":
         "results interpretation": llm_backend,
         "paper refinement":       llm_backend,
     }
+    if parallel_labs:
+        remove_figures()
+        GLOBAL_AGENTRXIV = AgentRxiv()
+        remove_directory(f"{RESEARCH_DIR_PATH}")
+        os.mkdir(os.path.join(".", f"{RESEARCH_DIR_PATH}"))
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        if not compile_pdf: raise Exception("PDF compilation must be used with agentRxiv!")
+        def run_lab(parallel_lab_index):
+            time_str = str()
+            time_now = time.time()
+            for _paper_index in range(num_papers_to_write):
+                lab_dir = os.path.join(RESEARCH_DIR_PATH, f"research_dir_lab{parallel_lab_index}_paper{_paper_index}")
+                os.mkdir(lab_dir)
+                os.mkdir(os.path.join(lab_dir, "src"))
+                os.mkdir(os.path.join(lab_dir, "tex"))
+                lab_instance = LaboratoryWorkflow(
+                    parallelized=True,
+                    research_topic=research_topic,
+                    notes=task_notes_LLM,
+                    agent_model_backbone=agent_models,
+                    human_in_loop_flag=human_in_loop,
+                    openai_api_key=api_key,
+                    compile_pdf=compile_pdf,
+                    num_papers_lit_review=num_papers_lit_review,
+                    papersolver_max_steps=papersolver_max_steps,
+                    mlesolver_max_steps=mlesolver_max_steps,
+                    paper_index=_paper_index,
+                    lab_index=parallel_lab_index,
+                    except_if_fail=except_if_fail,
+                    lab_dir=lab_dir,
+                    agentRxiv=True,
+                    agentrxiv_papers=args.agentrxiv_papers
+                )
+                lab_instance.perform_research()
+                time_str += str(time.time() - time_now) + " | "
+                with open(f"agent_times_{parallel_lab_index}.txt", "w") as f:
+                    f.write(time_str)
+                time_now = time.time()
 
-    if load_existing:
-        load_path = args.load_existing_path
-        if load_path is None:
-            raise ValueError("Please provide path to load existing state.")
-        with open(load_path, "rb") as f:
-            lab = pickle.load(f)
+        with ThreadPoolExecutor(max_workers=num_parallel_labs) as executor:
+            futures = [executor.submit(run_lab, lab_idx) for lab_idx in range(num_parallel_labs)]
+            for future in as_completed(futures):
+                try: future.result()
+                except Exception as e: print(f"Error in lab: {e}")
+
+        raise NotImplementedError("Todo: implement parallel labs")
     else:
-        lab = LaboratoryWorkflow(
-            research_topic=research_topic,
-            notes=task_notes_LLM,
-            agent_model_backbone=agent_models,
-            human_in_loop_flag=human_in_loop,
-            openai_api_key=api_key,
-            compile_pdf=compile_pdf,
-            num_papers_lit_review=num_papers_lit_review,
-            papersolver_max_steps=papersolver_max_steps,
-            mlesolver_max_steps=mlesolver_max_steps,
-        )
+        # remove previous files
+        remove_figures()
+        if agentRxiv: GLOBAL_AGENTRXIV = AgentRxiv(lab_index)
+        if not agentRxiv:
+            remove_directory(f"{RESEARCH_DIR_PATH}")
+            os.mkdir(os.path.join(".", f"{RESEARCH_DIR_PATH}"))
+        # make src and research directory
+        if not os.path.exists("state_saves"): os.mkdir(os.path.join(".", "state_saves"))
+        time_str = str()
+        time_now = time.time()
+        for _paper_index in range(num_papers_to_write):
+            lab_direct = f"{RESEARCH_DIR_PATH}/research_dir_{_paper_index}_lab_{lab_index}"
+            os.mkdir(os.path.join(".", lab_direct))
+            os.mkdir(os.path.join(f"./{lab_direct}", "src"))
+            os.mkdir(os.path.join(f"./{lab_direct}", "tex"))
+            lab = LaboratoryWorkflow(
+                research_topic=research_topic,
+                notes=task_notes_LLM,
+                agent_model_backbone=agent_models,
+                human_in_loop_flag=human_in_loop,
+                openai_api_key=api_key,
+                compile_pdf=compile_pdf,
+                num_papers_lit_review=num_papers_lit_review,
+                papersolver_max_steps=papersolver_max_steps,
+                mlesolver_max_steps=mlesolver_max_steps,
+                paper_index=_paper_index,
+                except_if_fail=except_if_fail,
+                agentRxiv=False,
+                lab_index=lab_index,
+                lab_dir=f"./{lab_direct}"
+            )
+            lab.perform_research()
+            time_str += str(time.time() - time_now) + " | "
+            with open(f"agent_times_{lab_index}.txt", "w") as f:
+                f.write(time_str)
+            time_now = time.time()
 
-    lab.perform_research()
+
+
+
+
+
+
+"""
+@@@@@@@@@@@@@@@ CHECKLIST @@@@@@@@@@@@@@@ 
+Practical:
+----------
+- Make a better config system (YAML?)
+
+Advancements:
+-------------
+- Make the ability to have agents build on top of their own research
+- Run agent labs in parallel (asynch) 
+
+"""
+
 
 
 
