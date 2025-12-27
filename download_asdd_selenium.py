@@ -184,118 +184,46 @@ class ASDDSeleniumDownloader:
             logger.error(f"Error getting constituencies: {e}")
             return []
 
-    def get_parts(self, ac_value):
-        """Get all parts for an assembly constituency"""
+    def get_download_buttons(self, ac_value):
+        """Get all download buttons for polling stations after selecting AC"""
         try:
             # Select AC (correct ID is ddlAC)
             ac_select = Select(self.driver.find_element(By.ID, "ddlAC"))
             ac_select.select_by_value(ac_value)
 
-            # Wait for part dropdown to populate
-            time.sleep(2)
-
-            # Try different possible IDs for part dropdown
-            part_element = None
-            for part_id in ["ddlPart", "part", "ddlPartNo"]:
-                try:
-                    part_element = WebDriverWait(self.driver, 5).until(
-                        EC.presence_of_element_located((By.ID, part_id))
-                    )
-                    logger.info(f"Found part dropdown with ID: {part_id}")
-                    break
-                except:
-                    continue
-
-            if not part_element:
-                logger.warning("Could not find part dropdown")
-                return []
-
-            part_select = Select(part_element)
-            parts = []
-
-            for option in part_select.options:
-                value = option.get_attribute("value")
-                text = option.text.strip()
-
-                if value and value != "" and text.lower() not in ['select', 'select part', '-- select part --']:
-                    parts.append({
-                        'value': value,
-                        'name': text
-                    })
-
-            logger.info(f"Found {len(parts)} parts")
-            return parts
-
-        except Exception as e:
-            logger.error(f"Error getting parts: {e}")
-            return []
-
-    def download_part_data(self, district_name, ac_name, part_value, part_name):
-        """Download data for a specific part"""
-        try:
-            # Find and select part dropdown
-            part_element = None
-            for part_id in ["ddlPart", "part", "ddlPartNo"]:
-                try:
-                    part_element = self.driver.find_element(By.ID, part_id)
-                    break
-                except:
-                    continue
-
-            if not part_element:
-                logger.error("Could not find part dropdown for download")
-                self.stats['failed'] += 1
-                return False
-
-            part_select = Select(part_element)
-            part_select.select_by_value(part_value)
-
-            time.sleep(1)
-
-            # Look for download button/link
-            # Try multiple strategies
-            download_success = False
-
-            try:
-                # Strategy 1: Look for button with ID
-                download_btn = self.driver.find_element(By.ID, "btnDownload")
-                download_btn.click()
-                download_success = True
-            except NoSuchElementException:
-                pass
-
-            if not download_success:
-                try:
-                    # Strategy 2: Look for button with Download text
-                    download_btn = self.driver.find_element(By.XPATH, "//button[contains(text(), 'Download') or contains(text(), 'DOWNLOAD')]")
-                    download_btn.click()
-                    download_success = True
-                except NoSuchElementException:
-                    pass
-
-            if not download_success:
-                try:
-                    # Strategy 3: Look for link with PDF
-                    download_link = self.driver.find_element(By.XPATH, "//a[contains(@href, '.pdf') or contains(text(), 'Download')]")
-                    download_link.click()
-                    download_success = True
-                except NoSuchElementException:
-                    pass
-
-            if not download_success:
-                logger.error(f"Could not find download button for part {part_name}")
-                self.stats['failed'] += 1
-                return False
-
-            # Wait for download
+            # Wait for table to load
+            logger.info("Waiting for polling station table to load...")
             time.sleep(3)
 
-            logger.info(f"Downloaded: {district_name} > {ac_name} > Part {part_name}")
+            # Find all download buttons in the table
+            download_buttons = self.driver.find_elements(By.XPATH, "//button[contains(text(), 'Download')]")
+
+            if not download_buttons:
+                # Try alternative - look for links
+                download_buttons = self.driver.find_elements(By.XPATH, "//a[contains(text(), 'Download')]")
+
+            logger.info(f"Found {len(download_buttons)} polling stations with download buttons")
+            return download_buttons
+
+        except Exception as e:
+            logger.error(f"Error getting download buttons: {e}")
+            return []
+
+    def download_polling_station(self, district_name, ac_name, button, ps_number):
+        """Download data for a specific polling station"""
+        try:
+            # Click the download button
+            button.click()
+
+            # Wait for download to complete
+            time.sleep(2)
+
+            logger.info(f"Downloaded: {district_name} > {ac_name} > PS #{ps_number}")
             self.stats['downloaded'] += 1
             return True
 
         except Exception as e:
-            logger.error(f"Failed to download part {part_name}: {e}")
+            logger.error(f"Failed to download PS #{ps_number}: {e}")
             self.stats['failed'] += 1
             return False
 
@@ -337,23 +265,22 @@ class ASDDSeleniumDownloader:
                     ac_dir = district_dir / self.sanitize_filename(ac_name)
                     ac_dir.mkdir(exist_ok=True)
 
-                    # Get parts
-                    parts = self.get_parts(ac_value)
-                    self.stats['parts'] += len(parts)
+                    # Get download buttons for all polling stations
+                    download_buttons = self.get_download_buttons(ac_value)
+                    self.stats['parts'] += len(download_buttons)
 
-                    for part in parts:
-                        part_value = part['value']
-                        part_name = part['name']
+                    logger.info(f"Found {len(download_buttons)} polling stations to download")
 
+                    for i, button in enumerate(download_buttons, 1):
                         # Check if already downloaded
-                        key = f"{district_name}|{ac_name}|{part_name}"
+                        key = f"{district_name}|{ac_name}|PS{i}"
                         if key in self.progress['completed']:
-                            logger.info(f"Skipping already downloaded: Part {part_name}")
+                            logger.info(f"Skipping already downloaded: PS #{i}")
                             continue
 
                         # Download
-                        success = self.download_part_data(
-                            district_name, ac_name, part_value, part_name
+                        success = self.download_polling_station(
+                            district_name, ac_name, button, i
                         )
 
                         if success:
@@ -366,9 +293,21 @@ class ASDDSeleniumDownloader:
                         # Be polite to the server
                         time.sleep(1)
 
-                    # Go back to main page after each AC
+                    # Go back to main page after each AC to reset the form
+                    logger.info("Returning to main page...")
                     self.driver.get(self.url)
                     time.sleep(2)
+
+                    # Click ASDD button again for next AC
+                    try:
+                        asdd_button = WebDriverWait(self.driver, 10).until(
+                            EC.element_to_be_clickable((By.XPATH,
+                                "//button[contains(text(), 'Download ASDD list by Assembly Constituency')]"))
+                        )
+                        asdd_button.click()
+                        time.sleep(2)
+                    except:
+                        pass
 
         finally:
             self.close_driver()
