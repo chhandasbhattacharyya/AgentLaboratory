@@ -2,9 +2,27 @@
 
 This tool downloads ASDD (Absent/Shifted/Deceased) voter list data from the West Bengal Chief Electoral Officer website (https://ceowestbengal.wb.gov.in/asd_sir).
 
+## ⚠️ IMPORTANT: CAPTCHA Limitation
+
+**The website requires CAPTCHA verification for downloads, which means fully automated downloading is not possible.**
+
+### Available Solutions:
+
+1. **Semi-Automated (RECOMMENDED)**: Use `download_asdd_manual.py`
+   - Script clicks download buttons automatically
+   - You solve CAPTCHAs manually when they appear
+   - Best balance between automation and CAPTCHA requirements
+
+2. **URL Extraction**: Use `extract_asdd_urls.py`
+   - Extracts download information without clicking
+   - Saves data to CSV for review
+   - No downloads, just information gathering
+
+3. **Fully Manual**: Use the website normally
+
 ## Overview
 
-The ASDD list contains voters whose names were in the West Bengal Electoral Rolls but are not included in the Draft Roll. This tool systematically downloads all ASDD data district by district, assembly constituency by constituency, and part by part.
+The ASDD list contains voters whose names were in the West Bengal Electoral Rolls but are not included in the Draft Roll. Due to CAPTCHA protection, this tool provides semi-automated assistance rather than fully automated downloading.
 
 ## Prerequisites
 
@@ -52,7 +70,47 @@ python3 download_asdd_selenium.py --help
 
 ## Usage
 
-### Test with a Single District (Recommended First)
+### RECOMMENDED: Semi-Automated Downloading (Handles CAPTCHA)
+
+**Use this method to download data with manual CAPTCHA solving:**
+
+```bash
+python download_asdd_manual.py
+```
+
+**How it works:**
+1. Browser opens and navigates to ASDD page
+2. You have 15 seconds to manually select District and Assembly Constituency
+3. Press ENTER when table loads
+4. Script automatically clicks each Download button
+5. **When CAPTCHA appears, solve it manually** during the 10-second wait
+6. Script continues after each download
+7. Files save to `asdd_data/` folder
+
+**Interactive controls:**
+- If download fails, you can: skip, retry, or stop
+- Script waits 10 seconds between downloads for CAPTCHA solving
+- You must stay present to solve CAPTCHAs
+
+---
+
+### Alternative: Extract URLs Only (No Downloads)
+
+**Use this to gather information without triggering CAPTCHA:**
+
+```bash
+python extract_asdd_urls.py
+```
+
+This saves polling station info to CSV without downloading files.
+
+---
+
+### DEPRECATED: Fully Automated (Blocked by CAPTCHA)
+
+**Note:** The following methods will fail due to CAPTCHA protection. Use semi-automated approach instead.
+
+#### Test with a Single District (Will Trigger CAPTCHA)
 
 To test the script with Malda district:
 
