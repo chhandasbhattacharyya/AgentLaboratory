@@ -115,15 +115,29 @@ class ASDDSeleniumDownloader:
             self.driver.get(self.url)
             time.sleep(3)  # Wait for page load
 
-            # Find district dropdown
-            district_select = Select(self.driver.find_element(By.ID, "district"))
+            # Click the "Download ASDD list" button to access the form
+            try:
+                logger.info("Looking for ASDD download button...")
+                asdd_button = WebDriverWait(self.driver, 10).until(
+                    EC.element_to_be_clickable((By.XPATH,
+                        "//button[contains(text(), 'Download ASDD list by Assembly Constituency')]"))
+                )
+                asdd_button.click()
+                logger.info("Clicked ASDD download button")
+                time.sleep(2)  # Wait for form to appear
+            except Exception as e:
+                logger.warning(f"Could not find/click ASDD button: {e}")
+                # Continue anyway, form might already be visible
+
+            # Find district dropdown (correct ID is ddlDistrict)
+            district_select = Select(self.driver.find_element(By.ID, "ddlDistrict"))
             districts = []
 
             for option in district_select.options:
                 value = option.get_attribute("value")
                 text = option.text.strip()
 
-                if value and value != "0" and text.lower() not in ['select', 'select district']:
+                if value and value != "" and text.lower() not in ['select', 'select district', '-- select district --']:
                     districts.append({
                         'value': value,
                         'name': text
@@ -140,24 +154,24 @@ class ASDDSeleniumDownloader:
     def get_constituencies(self, district_value):
         """Get all assembly constituencies for a district"""
         try:
-            # Select district
-            district_select = Select(self.driver.find_element(By.ID, "district"))
+            # Select district (correct ID is ddlDistrict)
+            district_select = Select(self.driver.find_element(By.ID, "ddlDistrict"))
             district_select.select_by_value(district_value)
 
             # Wait for constituency dropdown to populate
             time.sleep(2)
             WebDriverWait(self.driver, 10).until(
-                EC.presence_of_element_located((By.ID, "ac"))
+                EC.presence_of_element_located((By.ID, "ddlAC"))
             )
 
-            ac_select = Select(self.driver.find_element(By.ID, "ac"))
+            ac_select = Select(self.driver.find_element(By.ID, "ddlAC"))
             constituencies = []
 
             for option in ac_select.options:
                 value = option.get_attribute("value")
                 text = option.text.strip()
 
-                if value and value != "0" and text.lower() not in ['select', 'select assembly']:
+                if value and value != "" and text.lower() not in ['select', 'select assembly', '-- select ac --']:
                     constituencies.append({
                         'value': value,
                         'name': text
@@ -173,24 +187,37 @@ class ASDDSeleniumDownloader:
     def get_parts(self, ac_value):
         """Get all parts for an assembly constituency"""
         try:
-            # Select AC
-            ac_select = Select(self.driver.find_element(By.ID, "ac"))
+            # Select AC (correct ID is ddlAC)
+            ac_select = Select(self.driver.find_element(By.ID, "ddlAC"))
             ac_select.select_by_value(ac_value)
 
             # Wait for part dropdown to populate
             time.sleep(2)
-            WebDriverWait(self.driver, 10).until(
-                EC.presence_of_element_located((By.ID, "part"))
-            )
 
-            part_select = Select(self.driver.find_element(By.ID, "part"))
+            # Try different possible IDs for part dropdown
+            part_element = None
+            for part_id in ["ddlPart", "part", "ddlPartNo"]:
+                try:
+                    part_element = WebDriverWait(self.driver, 5).until(
+                        EC.presence_of_element_located((By.ID, part_id))
+                    )
+                    logger.info(f"Found part dropdown with ID: {part_id}")
+                    break
+                except:
+                    continue
+
+            if not part_element:
+                logger.warning("Could not find part dropdown")
+                return []
+
+            part_select = Select(part_element)
             parts = []
 
             for option in part_select.options:
                 value = option.get_attribute("value")
                 text = option.text.strip()
 
-                if value and value != "0" and text.lower() not in ['select', 'select part']:
+                if value and value != "" and text.lower() not in ['select', 'select part', '-- select part --']:
                     parts.append({
                         'value': value,
                         'name': text
@@ -206,21 +233,59 @@ class ASDDSeleniumDownloader:
     def download_part_data(self, district_name, ac_name, part_value, part_name):
         """Download data for a specific part"""
         try:
-            # Select part
-            part_select = Select(self.driver.find_element(By.ID, "part"))
+            # Find and select part dropdown
+            part_element = None
+            for part_id in ["ddlPart", "part", "ddlPartNo"]:
+                try:
+                    part_element = self.driver.find_element(By.ID, part_id)
+                    break
+                except:
+                    continue
+
+            if not part_element:
+                logger.error("Could not find part dropdown for download")
+                self.stats['failed'] += 1
+                return False
+
+            part_select = Select(part_element)
             part_select.select_by_value(part_value)
 
             time.sleep(1)
 
             # Look for download button/link
-            # This may need adjustment based on actual page structure
+            # Try multiple strategies
+            download_success = False
+
             try:
-                download_btn = self.driver.find_element(By.ID, "download")
+                # Strategy 1: Look for button with ID
+                download_btn = self.driver.find_element(By.ID, "btnDownload")
                 download_btn.click()
+                download_success = True
             except NoSuchElementException:
-                # Try alternative selectors
-                download_btn = self.driver.find_element(By.XPATH, "//button[contains(text(), 'Download')]")
-                download_btn.click()
+                pass
+
+            if not download_success:
+                try:
+                    # Strategy 2: Look for button with Download text
+                    download_btn = self.driver.find_element(By.XPATH, "//button[contains(text(), 'Download') or contains(text(), 'DOWNLOAD')]")
+                    download_btn.click()
+                    download_success = True
+                except NoSuchElementException:
+                    pass
+
+            if not download_success:
+                try:
+                    # Strategy 3: Look for link with PDF
+                    download_link = self.driver.find_element(By.XPATH, "//a[contains(@href, '.pdf') or contains(text(), 'Download')]")
+                    download_link.click()
+                    download_success = True
+                except NoSuchElementException:
+                    pass
+
+            if not download_success:
+                logger.error(f"Could not find download button for part {part_name}")
+                self.stats['failed'] += 1
+                return False
 
             # Wait for download
             time.sleep(3)
