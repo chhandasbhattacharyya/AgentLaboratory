@@ -104,7 +104,13 @@ def inspect_page():
         print("FINDING DOWNLOAD LINKS:")
         print("="*60)
         links = driver.find_elements(By.TAG_NAME, "a")
-        download_links = [link for link in links if 'download' in link.get_attribute('href').lower() or 'download' in link.text.lower()]
+        download_links = []
+        for link in links:
+            href = link.get_attribute('href')
+            text = link.text.strip()
+            if href and ('download' in href.lower() or 'download' in text.lower() or 'pdf' in href.lower()):
+                download_links.append(link)
+
         print(f"Found {len(download_links)} potential download links\n")
 
         for i, link in enumerate(download_links[:10], 1):
